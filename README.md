@@ -1,4 +1,4 @@
-# CS 6210: Advanced Operating Systems
+# CS 4210/CS 6210: Advanced Operating Systems
 ## Project 2: Inter-process Communication Services
 ### Due: Friday Mar. 01, 2019 @ 11:59pm
 
