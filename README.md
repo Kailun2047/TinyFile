@@ -4,7 +4,7 @@
 
 In this project, you will create a TinyFile service which supports synchronous calls, asynchronous calls, and optionally QoS mechanisms. You may work in pairs on this project. You may share ideas with other pairs, but you may not share code. You also may not download code or use any other external libraries without consulting the instructor or TA first.
 
-Please check the pdf files the details:
+Please check the pdf files for details:
 - [Project description](./CS6210_proj2_description.pdf)
 - [IPC and Shared Memory structure](./CS6210_proj2_ipc_shm.pdf)
 - [Ideas of IPC APIs](./CS6210_proj2_api_details.pdf)
