@@ -1,17 +1,20 @@
 #pragma once
+#include <pthread.h>
+
+#define REQUEST_TYPE 1
+#define SIZE_T_BYTES sizeof(size_t)/sizeof(char)
 
 typedef struct mymsg_t {
-	long mtype;
-	int mcont; // name of file to be processed by service]
+	long type;
+	char data[SIZE_T_BYTES*4]; // <file_id, current chunk, total chunks, bytes to read> for request; <current chunk, bytes to read for result>
 } mymsg;
 
-typedef struct ipc_config_t {
+typedef struct ipc_shared_info_t {
 	int seg_num; // the upper bound of the available shared memory segments
 	long seg_size; // the size of an indivifual shared memory segment in size_t
 	int remaining_num; // the segments that have already been allocated
-	int req_msgq_id; // message queue for the requests
-	int res_msgq_id; // message queue for the results
-	int completed_shmid; // shared memory id for the completed mask
-} ipc_config;
+	int msgq_id; // message queue for the requests
+	pthread_mutex_t *mutex; // mutex for shared info among clients (like the remaining available shm segments)
+} ipc_shared_info;
 
-extern ipc_config* ipc_conf;
+extern ipc_shared_info* ipc_shared;
