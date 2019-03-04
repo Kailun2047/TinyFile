@@ -17,6 +17,7 @@ extern void compress(char* input, size_t input_length, char* compressed, size_t*
 }
 
 int main(int argc, char** argv) {
+	while (1) {
 	size_t cursor_pos[argc - 1]; // bytes written in the buffer for each orginal file
 	char* buffer[argc - 1]; // original file data
 	char** data_buffers[argc - 1]; // compressed file data
@@ -59,4 +60,7 @@ int main(int argc, char** argv) {
 			}
 		}
 	}
+	}
+
+	return 0;
 }
