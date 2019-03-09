@@ -1,0 +1,11 @@
+Course Summary
+
+CS6210 Advanced Operating Systems is a graduate level course that covers in detail many advanced topics in operating system design and implementation. It starts with topics such as operating systems structuring, multithreading and synchronization and then moves on to systems issues in parallel and distributed computing systems. There is no textbook for this course. Rather, we will read and discuss a number of important research papers that have been published. For each paper that is covered in class, students are expected to gain a solid understanding of the problem that is addressed by the paper, and the solution proposed by the authors.
+
+Projects
+
+This course is project intensive and will have a sequence of four projects. Strong C programming skills are absolutely essential for completing these projects. Students can either do the entire sequence of assigned projects or they can choose to define a project that fits more closely with their individual research goals as a replacement of the projects after the first one. The first project is to be completed individually by everyone. For the student-defined project option, the project must be approved by the instructor.
+
+Learning Outcomes
+
+After mastering this class, students should have acquired solid knowledge about the principles and practice of operating systems, their development, and their implementation. This includes knowledge about OS structures, multicore and

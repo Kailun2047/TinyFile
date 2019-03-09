@@ -4,101 +4,263 @@
 #include <sys/ipc.h>
 #include <stdio.h>
 #include <pthread.h>
-#include <string.h> // strcat()
+#include <string.h> // strcat(), memcpy()
 #include <stdlib.h> // stoi()
 #include "shm_ipc.h"
-
-ipc_shared_info ipc_shared;
 
 /***********************************************/
 /** service process creation and initialzation **/
 /***********************************************/
 extern void shm_ipc_init(size_t num, long size, ipc_shared_info* shared_info) {
-	// create a message queues to store the request for the compression service
-	key_t msgq_key = ftok("msgq", 1);
-	shared_info->msgq_id = msgget(msgq_key, IPC_CREAT);
-	if (shared_info->msgq_id == -1) perror("At msgget() for requests in shm_ipc_init()");
+	// create message queues
+	const char* msgq_files[6] = {"requestq", "responseq", "origq", "serverackq", "resultq", "clientackq"};
+	for (int i = 0; i < 6; ++i) {
+		key_t msgq_key = ftok(msgq_files[i], 65);
+		printf("filename: %s, msgq key: %d\n", msgq_files[i], msgq_key);
+		shared_info->msgq_ids[i] = msgget(msgq_key, 0666 | IPC_CREAT);
+		printf("id of message queue: %d\n", shared_info->msgq_ids[i]);
+		if (shared_info->msgq_ids[i] == -1) perror("At msgget() in shm_ipc_init()");
+	}
 
 	// configure the shared memory parameters
 	shared_info->seg_num = num;
 	shared_info->seg_size = size;
-	shared_info->remaining_num = num;
-	pthread_mutex_init(&(shared_info->mutex), NULL);
+	shared_info->remaining = num;
 }
 
 
-/****************************************/
-/** API for client to call the service **/
-/****************************************/
-extern void call_service(char* filename, size_t file_id, char* result, size_t* compressed_size) {
-	// allocate the shared memory segments for the input file, and write file data to them
-	// if the file is larger than one shared memory segment, separate it into multiple segments
-	ipc_shared_info* shared_info = &ipc_shared;
-	printf("In call_service(), trying to open %s\n", filename);
+/*********************************************/
+/** API for client to sync call the service **/
+/*********************************************/
+extern void call_service(char* filename, size_t seg_size, char* result_buf, size_t* compressed_size) {
+	printf("In call_service()\n");
+	key_t file_key = ftok(filename, 65);
+	// get size of the file
 	FILE* fs = fopen(filename, "r");
-	if (!fs) printf("cannot open file\n");
+	if (!fs) perror("fopen failed\n");
 	fseek(fs, 0L, SEEK_END);
 	long int file_end = ftell(fs);
 	fseek(fs, 0L, SEEK_SET);
-	long int file_cur = ftell(fs);
-	printf("file_end: %ld, file_cur: %ld, shared_info->seg_size: %ld\n", file_end, file_cur, shared_info->seg_size);
-	size_t chunk_cnt = 0, chunk_tot = (file_end - file_cur)/shared_info->seg_size + ((file_end - file_cur)%shared_info->seg_size == 0? 0: 1);
-	printf("chunk_tot: %ld\n", chunk_tot);
-	char appendix[10];
-	char** buffers = (char**) malloc(chunk_tot*sizeof(char*)); // [cur_chunk][bytes], store the attached addresses of allocated shared memory segments
-	int* shmids = (int*) malloc(chunk_tot*(sizeof(int))); // store the shared memory ids so that we can destroy them later
-	
-	while(file_cur < file_end) {
-		pthread_mutex_lock(&(shared_info->mutex));
-		if (shared_info->remaining_num > 0) {
-			printf("segments remaining: %ld\n", shared_info->remaining_num);
-			key_t file_key = ftok(filename, chunk_cnt + 1); // proj_id must be non-zero
-			printf("file_key: %d\n", file_key);
-			shmids[chunk_cnt] = shmget(file_key, shared_info->seg_size, IPC_CREAT);
-			if (shmids[chunk_cnt] == -1) perror("At shmget() in call_service()");
-			buffers[chunk_cnt] = shmat(shmids[chunk_cnt], NULL, 0);
-			size_t bytes_read = (file_end - file_cur) < shared_info->seg_size? (file_end - file_cur): shared_info->seg_size;
-			printf("bytes read: %ld\n", bytes_read);
-			buffers[chunk_cnt] = (char*) malloc(shared_info->seg_size*sizeof(char));
-			fread(buffers[chunk_cnt], bytes_read, 1, fs);
-			file_cur += bytes_read;
+	long int file_cur = ftell(fs), file_size = file_end - file_cur;
+	size_t seg_needed = file_size/seg_size + (file_size%seg_size == 0? 0: 1);
+	printf("file size: %ld, segs needed: %ld\n", file_size, seg_needed);
 
-			// send the request record via the request message queue
-			mymsg msg;
-			mymsg* req_msg = &msg;
-			req_msg->type = REQUEST_TYPE;
-			memcpy(req_msg->data, &file_id, sizeof(size_t)/sizeof(char)); // file id (later will be used by service as message type)
-			memcpy(req_msg->data + SIZE_T_BYTES, &chunk_cnt, SIZE_T_BYTES); // current chunk
-			memcpy(req_msg->data + SIZE_T_BYTES*2, &chunk_tot, SIZE_T_BYTES); // total chunks
-			memcpy(req_msg->data + SIZE_T_BYTES*3, &bytes_read, SIZE_T_BYTES); // bytes to read in this segment
-			msgsnd(shared_info->msgq_id, req_msg, sizeof(mymsg), 0);
-			printf("message transmission for current chunk done\n");
+	/* send a request for segments onto request queue and wait for response */
+	key_t requestq_key = ftok("requestq", 65);
+	int requestq_id = msgget(requestq_key, 0666);
+	printf("requestq id: %d\n", requestq_id);
+	mymsg request;
+	mymsg* request_msg = &request;
+	request_msg->type = file_key + 1; // we want the message type to be positive
+	memcpy(request_msg->data, &seg_needed, SIZE_T_BYTES);
+	msgsnd(requestq_id, request_msg, SIZE_T_BYTES*4, 0);
+	key_t responseq_key = ftok("responseq", 65);
+	int responseq_id = msgget(responseq_key, 0666);
+	printf("responseq id: %d\n", responseq_id);
+	mymsg response;
+	mymsg* response_msg = &response;
+	while (msgrcv(responseq_id, response_msg, SIZE_T_BYTES*4, file_key + 1, IPC_NOWAIT) == -1);
 
-			shared_info->remaining_num--;
-			chunk_cnt++;
-		}
-		pthread_mutex_unlock(&(shared_info->mutex));
+	/* set up shm when there is a response from server */
+	size_t seg_num = 0;
+	memcpy(&seg_num, response_msg->data, SIZE_T_BYTES);
+	int shmids[seg_num];
+	char* shmaddrs[seg_num];
+	for (int i = 0; i < seg_num; ++i) {
+		key_t seg_key = ftok(filename, 65 + i);
+		shmids[i] = shmget(seg_key, seg_size, 0666 | IPC_CREAT);
+		//printf("shmids[%d] is %d\n", i, shmids[i]);
+		shmaddrs[i] = shmat(shmids[i], NULL, 0);
+		char* buf;
+		buf = shmat(shmids[i], NULL, 0);
 	}
+
+	/* copy data from original file to shared memory segments */
+	size_t segs = 0;
+	while (segs < seg_needed) {
+		printf("cursor position: %ld\n", ftell(fs));
+		size_t bytes_written = file_end - ftell(fs) > seg_size? seg_size: file_end - ftell(fs);
+		fread(shmaddrs[segs%seg_num], bytes_written, 1, fs);
+		printf("%ld bytes of data written into shmaddrs[%ld]\n", bytes_written, segs%seg_num);
+		/* send orig message */
+		mymsg orig;
+		mymsg* orig_msg = &orig;
+		orig_msg->type = file_key + 1;
+		memcpy(orig_msg->data, &segs, SIZE_T_BYTES);
+		memcpy(orig_msg->data + SIZE_T_BYTES, &seg_needed, SIZE_T_BYTES);
+		memcpy(orig_msg->data + SIZE_T_BYTES*2, &bytes_written, SIZE_T_BYTES);
+		key_t origq_key = ftok("origq", 65);
+		int origq_id = msgget(origq_key, 0666);
+		printf("orig queue id: %d\n", origq_id);
+		msgsnd(origq_id, orig_msg, SIZE_T_BYTES*4, 0);
+		segs++;
+		mymsg server_ack;
+		mymsg* server_ack_msg = &server_ack;
+		int server_ackq_id = msgget(ftok("serverackq", 65), 0666);
+		printf("server_ackq_id: %d\n", server_ackq_id);
+		printf("waiting for message type of %d in server_ack (server_ackq_id: %d)\n\n", file_key + 1, server_ackq_id);
+		while (msgrcv(server_ackq_id, server_ack_msg, SIZE_T_BYTES*4, file_key + 1, IPC_NOWAIT) == -1);
+	}
+
 	fclose(fs);
 
-	// check if the file have been compressed and passed back via shared memory
-	size_t received_cnt = 0;
-	compressed_size = 0;
-	while (received_cnt < chunk_tot) {
-		mymsg* msgp;
-		// the msgtyp 0 is used for any type, and msgtyp i is used for request type, so the msgtyp here should be file_id + 2
-		if (msgrcv(shared_info->msgq_id, msgp, sizeof(char)*SIZE_T_BYTES*4, file_id + 2, MSG_NOERROR | IPC_NOWAIT) != -1) {
-			received_cnt++;
-			// parse the message data
-			size_t cur_chunk, tot_chunk, read_bytes;
-			memcpy(&cur_chunk, msgp->data, SIZE_T_BYTES);
-			memcpy(&read_bytes, msgp->data + SIZE_T_BYTES*2, SIZE_T_BYTES);
-			// copy the compressed data into the result buffer
-			memcpy(result + *compressed_size, buffers[cur_chunk], read_bytes);
-			shmdt(buffers[cur_chunk]);
-			shmctl(shmids[cur_chunk], IPC_RMID, NULL);
+	/* read compressed data from shared memory and send acknowledgement */
+	size_t seg_received = 0;
+	while(seg_received < seg_needed) {
+		int resultq_id = msgget(ftok("resultq", 65), 0666);
+		mymsg result;
+		mymsg* result_msg = &result;
+		while (msgrcv(resultq_id, result_msg, SIZE_T_BYTES*4, file_key + 1, IPC_NOWAIT) == -1);
+		printf("received result message\n");
+		size_t cur_seg = 0, bytes_to_read = 0;
+		memcpy(&bytes_to_read, result_msg->data, SIZE_T_BYTES);
+		memcpy(result_buf + *compressed_size, shmaddrs[seg_received%seg_num], bytes_to_read);
 
-			*compressed_size += read_bytes;
-		}
+		seg_received++;
+		*compressed_size += bytes_to_read;
+		printf("bytes_to_read: %ld, size of compressed file: %ld\n", bytes_to_read, *compressed_size);
+
+		mymsg client_ack;
+		mymsg* client_ack_msg = &client_ack;
+		client_ack_msg->type = file_key + 1;
+		memcpy(client_ack_msg->data, &seg_received, SIZE_T_BYTES);
+		memcpy(client_ack_msg->data + SIZE_T_BYTES, &seg_needed, SIZE_T_BYTES);
+		int client_ackq_id = msgget(ftok("clientackq", 65), 0666);
+		msgsnd(client_ackq_id, client_ack_msg, SIZE_T_BYTES*4, 0);
 	}
+}
+
+
+
+/***************************************************/
+/* API for library thread to make rest of the call */
+/***************************************************/
+extern void* call_service_async(void* ptr) {
+	p_arg* arg_ptr = (p_arg*) ptr;
+	size_t seg_num = arg_ptr->seg_num;
+	char* filename = arg_ptr->filename;
+	size_t seg_size = arg_ptr->seg_size;
+	char* result_buf = arg_ptr->result_buf;
+	size_t* compressed_size = &(arg_ptr->compressed_size);
+
+	/* set up shm when there is a response from server */
+	int shmids[seg_num];
+	char* shmaddrs[seg_num];
+	for (int i = 0; i < seg_num; ++i) {
+		key_t seg_key = ftok(filename, 65 + i);
+		shmids[i] = shmget(seg_key, seg_size, 0666 | IPC_CREAT);
+		//printf("shmids[%d] is %d\n", i, shmids[i]);
+		shmaddrs[i] = shmat(shmids[i], NULL, 0);
+		char* buf;
+		buf = shmat(shmids[i], NULL, 0);
+	}
+
+	/* copy data from original file to shared memory segments */
+	FILE* fs = fopen(filename, "r");
+	size_t segs = 0;
+	fseek(fs, 0L, SEEK_END);
+	long int file_end = ftell(fs);
+	fseek(fs, 0L, SEEK_SET);
+	size_t seg_needed = file_end/seg_size + (file_end%seg_size == 0? 0: 1);
+	key_t file_key = ftok(filename, 65);
+	while (segs < seg_needed) {
+		printf("cursor position: %ld\n", ftell(fs));
+		size_t bytes_written = file_end - ftell(fs) > seg_size? seg_size: file_end - ftell(fs);
+		fread(shmaddrs[segs%seg_num], bytes_written, 1, fs);
+		printf("%ld bytes of data written into shmaddrs[%ld]\n", bytes_written, segs%seg_num);
+		/* send orig message */
+		mymsg orig;
+		mymsg* orig_msg = &orig;
+		orig_msg->type = file_key + 1;
+		memcpy(orig_msg->data, &segs, SIZE_T_BYTES);
+		memcpy(orig_msg->data + SIZE_T_BYTES, &seg_needed, SIZE_T_BYTES);
+		memcpy(orig_msg->data + SIZE_T_BYTES*2, &bytes_written, SIZE_T_BYTES);
+		key_t origq_key = ftok("origq", 65);
+		int origq_id = msgget(origq_key, 0666);
+		printf("orig queue id: %d\n", origq_id);
+		msgsnd(origq_id, orig_msg, SIZE_T_BYTES*4, 0);
+		segs++;
+		mymsg server_ack;
+		mymsg* server_ack_msg = &server_ack;
+		int server_ackq_id = msgget(ftok("serverackq", 65), 0666);
+		printf("server_ackq_id: %d\n", server_ackq_id);
+		printf("waiting for message type of %d in server_ack (server_ackq_id: %d)\n\n", file_key + 1, server_ackq_id);
+		while (msgrcv(server_ackq_id, server_ack_msg, SIZE_T_BYTES*4, file_key + 1, IPC_NOWAIT) == -1);
+	}
+
+	fclose(fs);
+
+	/* read compressed data from shared memory and send acknowledgement */
+	size_t seg_received = 0;
+	while(seg_received < seg_needed) {
+		int resultq_id = msgget(ftok("resultq", 65), 0666);
+		mymsg result;
+		mymsg* result_msg = &result;
+		while (msgrcv(resultq_id, result_msg, SIZE_T_BYTES*4, file_key + 1, IPC_NOWAIT) == -1);
+		printf("received result message\n");
+		size_t cur_seg = 0, bytes_to_read = 0;
+		memcpy(&bytes_to_read, result_msg->data, SIZE_T_BYTES);
+		memcpy(result_buf + *compressed_size, shmaddrs[seg_received%seg_num], bytes_to_read);
+
+		seg_received++;
+		*compressed_size += bytes_to_read;
+		printf("bytes_to_read: %ld, size of compressed file: %ld\n", bytes_to_read, *compressed_size);
+
+		mymsg client_ack;
+		mymsg* client_ack_msg = &client_ack;
+		client_ack_msg->type = file_key + 1;
+		memcpy(client_ack_msg->data, &seg_received, SIZE_T_BYTES);
+		memcpy(client_ack_msg->data + SIZE_T_BYTES, &seg_needed, SIZE_T_BYTES);
+		int client_ackq_id = msgget(ftok("clientackq", 65), 0666);
+		msgsnd(client_ackq_id, client_ack_msg, SIZE_T_BYTES*4, 0);
+	}
+	arg_ptr->has_result = 1;
+}
+
+
+/************************************************************/
+/* API for client to make sure there are shm segs available */
+/************************************************************/
+extern p_arg* initiate_service(char* filename, size_t seg_size) {
+	printf("In initiate_service()\n");
+	key_t file_key = ftok(filename, 65);
+	// get size of the file
+	FILE* fs = fopen(filename, "r");
+	if (!fs) perror("fopen failed\n");
+	fseek(fs, 0L, SEEK_END);
+	long int file_end = ftell(fs);
+	fseek(fs, 0L, SEEK_SET);
+	long int file_cur = ftell(fs), file_size = file_end - file_cur;
+	size_t seg_needed = file_size/seg_size + (file_size%seg_size == 0? 0: 1);
+	printf("file size: %ld, segs needed: %ld\n", file_size, seg_needed);
+	fclose(fs);
+
+	/* send a request for segments onto request queue and wait for response */
+	key_t requestq_key = ftok("requestq", 65);
+	int requestq_id = msgget(requestq_key, 0666);
+	printf("requestq id: %d\n", requestq_id);
+	mymsg request;
+	mymsg* request_msg = &request;
+	request_msg->type = file_key + 1; // we want the message type to be positive
+	memcpy(request_msg->data, &seg_needed, SIZE_T_BYTES);
+	msgsnd(requestq_id, request_msg, SIZE_T_BYTES*4, 0);
+	key_t responseq_key = ftok("responseq", 65);
+	int responseq_id = msgget(responseq_key, 0666);
+	printf("responseq id: %d\n", responseq_id);
+	mymsg response;
+	mymsg* response_msg = &response;
+	while (msgrcv(responseq_id, response_msg, SIZE_T_BYTES*4, file_key + 1, IPC_NOWAIT) == -1);
+
+	//request_handle rh_ptr = (request_handle*) malloc(sizeof(request_handle));
+	//rh_ptr->has_result = 0;
+
+	pthread_t helper_thread;
+	p_arg* arg_ptr = (p_arg*) malloc(sizeof(p_arg));
+	arg_ptr->has_result = 0;
+	memcpy(&(arg_ptr->seg_num), response_msg->data, SIZE_T_BYTES);
+	arg_ptr->filename = filename;
+	arg_ptr->seg_size = seg_size;
+	pthread_create(&helper_thread, NULL, call_service_async, arg_ptr);
+
+	return arg_ptr;
 }

@@ -15,7 +15,7 @@ $(OUT): $(OBJ)
 all: service test_service
 
 service: src/service.c
-	$(CC) $(CFLAGS) src/service.c src/shm_ipc.c src/libsnappy.a -o bin/service
+	$(CC) $(CFLAGS) -pthread src/service.c src/shm_ipc.c src/libsnappy.a -o bin/service
 
 test_service: src/test_service.c
 	$(CC) $(CFLAGS) -pthread src/test_service.c $(OUT) -o bin/test_service
